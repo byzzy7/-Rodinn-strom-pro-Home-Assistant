@@ -710,27 +710,6 @@ function computeLayout(ps) {
     });
   }
 
-  // Re-align spouses after children were pushed down (fixes: spouse without parents
-  // was aligned before propagation, then child moved deeper → spouses on different rows)
-  for(let pass=0; pass<10; pass++) {
-    let anyChange = false;
-    ps.forEach(p=>{
-      p.sids.forEach(sid=>{
-        if(depth[sid]===undefined || depth[p.id]===undefined) return;
-        if(depth[p.id] === depth[sid]) return;
-        const pHasParents = p.pids.some(pid=>ps.find(x=>x.id===pid));
-        const sHasParents = bi[sid]?.pids.some(pid=>ps.find(x=>x.id===pid));
-        let targetD;
-        if(pHasParents && !sHasParents)       targetD = depth[p.id];
-        else if(!pHasParents && sHasParents)  targetD = depth[sid];
-        else                                   targetD = Math.max(depth[p.id], depth[sid]);
-        if(depth[p.id] !== targetD){ depth[p.id]=targetD; anyChange=true; }
-        if(depth[sid] !== targetD){ depth[sid]=targetD; anyChange=true; }
-      });
-    });
-    if(!anyChange) break;
-  }
-
   // Then push parents above children (for root persons above other roots)
   changed=true;
   while(changed){
@@ -752,8 +731,12 @@ function computeLayout(ps) {
   const bd={};
   ps.forEach(p=>{ const d=depth[p.id]; if(!bd[d]) bd[d]=[]; if(!bd[d].includes(p.id)) bd[d].push(p.id); });
 
-  // Group each depth level into couple-units then sort units by shared children
-  Object.keys(bd).forEach(d=>{
+  // TOP-TO-BOTTOM layout — process depths in order so parent positions are
+  // available when sorting each child generation (fixes non-deterministic layout)
+  const pos={};
+  const sortedDepths = Object.keys(bd).map(Number).sort((a,b)=>a-b);
+
+  sortedDepths.forEach(d=>{
     const ids = bd[d];
     const used = new Set();
     const units = [];
@@ -790,14 +773,45 @@ function computeLayout(ps) {
     units.sort((a, b) => {
       const acids = childrenOf(a);
       const bcids = childrenOf(b);
+
+      // Primary sort: by average parent x position — minimizes crossings
+      // pos already contains positions for all shallower generations
+      const parentX = unit => {
+        let sum = 0, count = 0;
+        unit.forEach(id => {
+          const p = bi[id];
+          (p?.pids||[]).forEach(pid => {
+            const pp = pos[pid];
+            if(pp) { sum += pp.x + NW/2; count++; }
+          });
+          // also consider own position hint from spouse's parents
+          p?.sids.forEach(sid => {
+            (bi[sid]?.pids||[]).forEach(pid => {
+              const pp = pos[pid];
+              if(pp) { sum += pp.x + NW/2; count++; }
+            });
+          });
+        });
+        return count ? sum / count : 0;
+      };
+
+      const ax = parentX(a);
+      const bx = parentX(b);
+      if(ax !== bx) return ax - bx;
+
+      // Secondary: couples with children before those without
       const aHasKids = acids.length > 0;
       const bHasKids = bcids.length > 0;
       if(aHasKids && !bHasKids) return -1;
       if(!aHasKids && bHasKids) return 1;
-      if(!aHasKids && !bHasKids) return 0;
-      const ayr = Math.min(...acids.map(c=>yearFrom(bi[c]?.birth)||9999));
-      const byr = Math.min(...bcids.map(c=>yearFrom(bi[c]?.birth)||9999));
-      return ayr - byr;
+
+      // Tertiary: by birth year of first child
+      if(aHasKids && bHasKids) {
+        const ayr = Math.min(...acids.map(c=>yearFrom(bi[c]?.birth)||9999));
+        const byr = Math.min(...bcids.map(c=>yearFrom(bi[c]?.birth)||9999));
+        return ayr - byr;
+      }
+      return 0;
     });
 
     // After sorting, move each childless unit next to its spouse's unit
@@ -820,15 +834,41 @@ function computeLayout(ps) {
       }
     }
 
-    bd[d] = units.flat();
-  });
+    // Assign positions: each unit centered under its parents, overlaps resolved right
+    const placed = units.map(unit => {
+      let pxSum=0, pxCount=0;
+      unit.forEach(id => {
+        (bi[id]?.pids||[]).forEach(pid => { if(pos[pid]){pxSum+=pos[pid].x; pxCount++;} });
+        (bi[id]?.sids||[]).forEach(sid => {
+          (bi[sid]?.pids||[]).forEach(pid => { if(pos[pid]){pxSum+=pos[pid].x; pxCount++;} });
+        });
+      });
+      const w = unit.length*NW + (unit.length-1)*HG;
+      const idealCenter = pxCount ? pxSum/pxCount : null;
+      return { unit, w, left: idealCenter !== null ? idealCenter - w/2 : null };
+    });
 
-  // TOP-TO-BOTTOM layout
-  const pos={};
-  Object.entries(bd).sort(([a],[b])=>+a-+b).forEach(([d,ids])=>{
-    const total=ids.length*NW+(ids.length-1)*HG;
-    const sx=-total/2+NW/2;
-    ids.forEach((id,i)=>{ pos[id]={x:sx+i*(NW+HG), y:+d*(NH+VG), d:+d}; });
+    if(!placed.some(p => p.left !== null)) {
+      // Root level — center all around 0
+      const total = placed.reduce((s,p)=>s+p.w, 0) + (placed.length-1)*HG;
+      let x = -total/2;
+      placed.forEach(({unit, w}) => {
+        unit.forEach((id,i)=>{ pos[id]={x:x+i*(NW+HG)+NW/2, y:d*(NH+VG), d}; });
+        x += w + HG;
+      });
+    } else {
+      // Non-root: place under parents, fall back to 0 if unconnected
+      placed.forEach(p => { if(p.left===null) p.left=0; });
+      placed.sort((a,b) => a.left - b.left);
+      // Resolve overlaps left→right
+      for(let i=1; i<placed.length; i++){
+        const minLeft = placed[i-1].left + placed[i-1].w + HG;
+        if(placed[i].left < minLeft) placed[i].left = minLeft;
+      }
+      placed.forEach(({unit, left}) => {
+        unit.forEach((id,i)=>{ pos[id]={x:left+i*(NW+HG)+NW/2, y:d*(NH+VG), d}; });
+      });
+    }
   });
   return pos;
 }
@@ -857,7 +897,7 @@ function renderTree() {
   const drawn=new Set();
   people.forEach(p=>{
     const pp=layout[p.id]; if(!pp) return;
-    const lCol = lineColor(p.id);
+    const fCol = familyColor(p.id);
     p.cids.forEach(cid=>{
       const cp=layout[cid]; if(!cp) return;
       const ch=bi[cid];
@@ -868,25 +908,23 @@ function renderTree() {
       const co = coId ? layout[coId] : null;
       const fx = co ? (pp.x + co.x) / 2 + NW/2 : pp.x + NW/2;
       const fy=pp.y+NH/2+4, ty=cp.y-NH/2-4, my=(fy+ty)/2;
-      const path=S('path',{d:`M ${fx} ${fy} C ${fx} ${my} ${cp.x+NW/2} ${my} ${cp.x+NW/2} ${ty}`,fill:'none',stroke:'var(--border2)','stroke-width':'2',opacity:'0.8','stroke-linecap':'round'});
-      cl.appendChild(path);
+      const d=`M ${fx} ${fy} C ${fx} ${my} ${cp.x+NW/2} ${my} ${cp.x+NW/2} ${ty}`;
+      const glow=S('path',{d,fill:'none',stroke:fCol,'stroke-width':'7',opacity:'0.10','stroke-linecap':'round'});
+      const path=S('path',{d,fill:'none',stroke:fCol,'stroke-width':'2','stroke-linecap':'round',opacity:'0.50'});
+      cl.appendChild(glow); cl.appendChild(path);
     });
     p.sids.forEach(sid=>{
       const sp=layout[sid]; if(!sp) return;
-      // deduplicate using sorted key
       const pairKey = [p.id, sid].sort().join('~');
       if(drawn.has(pairKey)) return; drawn.add(pairKey);
-      const leftP = pp.x <= sp.x ? pp : sp;
-      const rightP = pp.x <= sp.x ? sp : pp;
-      // pos.x is card center → right edge = pos.x+NW/2, left edge = pos.x-NW/2
-      // pos.y is card center → vertical midpoint = pos.y
-      const x1=leftP.x+NW/2,  y1=leftP.y;
-      const x2=rightP.x-NW/2, y2=rightP.y;
-      const mx=(x1+x2)/2, my=(y1+y2)/2;
-      const l1=S('line',{x1:String(x1),y1:String(y1),x2:String(mx-10),y2:String(my),stroke:'var(--border2)','stroke-width':'1.8','stroke-dasharray':'4 3',opacity:'0.8'});
-      const l2=S('line',{x1:String(mx+10),y1:String(my),x2:String(x2),y2:String(y2),stroke:'var(--border2)','stroke-width':'1.8','stroke-dasharray':'4 3',opacity:'0.8'});
-      const ht=ST('♥',{x:String(mx),y:String(my+5),'text-anchor':'middle','font-size':'13',fill:'var(--text3)',opacity:'0.7'});
-      cl.appendChild(l1); cl.appendChild(l2); cl.appendChild(ht);
+      const x1=pp.x+NW/2;
+      const x2=sp.x-NW/2;
+      const mx=(x1+x2)/2, my=(pp.y+sp.y)/2;
+      const l1=S('line',{x1:String(x1),y1:String(my),x2:String(mx-11),y2:String(my),stroke:'#E8436B','stroke-width':'1.5','stroke-dasharray':'5 3','stroke-linecap':'round',opacity:'0.45'});
+      const l2=S('line',{x1:String(mx+11),y1:String(my),x2:String(x2),y2:String(my),stroke:'#E8436B','stroke-width':'1.5','stroke-dasharray':'5 3','stroke-linecap':'round',opacity:'0.45'});
+      const hbg=S('circle',{cx:String(mx),cy:String(my),r:'10',fill:'var(--surface)',stroke:'#F9C0CE','stroke-width':'1.5'});
+      const ht=ST('♥',{x:String(mx),y:String(my),'text-anchor':'middle','dominant-baseline':'central','font-size':'11',fill:'#E8436B',opacity:'0.85'});
+      cl.appendChild(l1); cl.appendChild(l2); cl.appendChild(hbg); cl.appendChild(ht);
     });
   });
 
@@ -1237,7 +1275,7 @@ function showInfo(id){
   const parents=p.pids.map(x=>bi[x]).filter(Boolean);
   const spouses=p.sids.map(x=>bi[x]).filter(Boolean);
   const children=p.cids.map(x=>bi[x]).filter(Boolean);
-  const siblings=people.filter(q=>q.id!==id&&q.pids.some(pid=>p.pids.includes(pid)));
+  const siblings=people.filter(q=>q.id!==id&&(q.pids.some(pid=>p.pids.includes(pid))||(p.sibids||[]).includes(q.id)));
 
   const rels=document.getElementById('info-relations'); rels.innerHTML='';
   const add=(lbl,list)=>{ if(!list.length) return; const dt=document.createElement('dt'); dt.textContent=lbl; rels.appendChild(dt); const dd=document.createElement('dd'); dd.textContent=list.map(x=>`${x.fn} ${x.ln}`).join(', '); rels.appendChild(dd); };
@@ -1312,8 +1350,9 @@ function populateSelects(editing){
     if(fId) document.getElementById('f-father').value=fId;
     if(mId) document.getElementById('f-mother').value=mId;
     if(editing.sids[0]) document.getElementById('f-spouse').value=editing.sids[0];
-    // find existing sibling (shares same parents, not via pids directly)
-    const sibId = people.find(q=>q.id!==editing.id && q.pids.some(pid=>editing.pids.includes(pid)))?.id || '';
+    // find existing sibling (shares same parents, or via explicit sibids)
+    const sibId = people.find(q=>q.id!==editing.id && q.pids.some(pid=>editing.pids.includes(pid)))?.id
+               || (editing.sibids||[])[0] || '';
     if(sibId) document.getElementById('f-sibling').value=sibId;
   }
 }
@@ -1351,11 +1390,12 @@ function savePerson(){
     // remove old relations
     p.pids.forEach(pid=>{ const par=people.find(x=>x.id===pid); if(par) par.cids=par.cids.filter(c=>c!==eid); });
     p.sids.forEach(sid=>{ const sp=people.find(x=>x.id===sid); if(sp) sp.sids=sp.sids.filter(s=>s!==eid); });
-    Object.assign(p,{fn,ln,maiden,birth,death,gender,place,note,pids,sids,photo:photoData||p.photo});
+    (p.sibids||[]).forEach(sid=>{ const sb=people.find(x=>x.id===sid); if(sb&&sb.sibids) sb.sibids=sb.sibids.filter(s=>s!==eid); });
+    Object.assign(p,{fn,ln,maiden,birth,death,gender,place,note,pids,sids,sibids:[],photo:photoData||p.photo});
     toast(`${fn} ${ln} upraven`);
   } else {
     const id='p_'+Date.now();
-    people.push({id,fn,ln,maiden,birth,death,gender,place,note,pids,sids,cids:[],photo:photoData||''});
+    people.push({id,fn,ln,maiden,birth,death,gender,place,note,pids,sids,sibids:[],cids:[],photo:photoData||''});
     toast(`${fn} ${ln} přidán`);
   }
   // apply new relations
@@ -1365,7 +1405,17 @@ function savePerson(){
   // if sibling used to inherit parents, also update those parents' cids
   if(sibId && [fId,mId].filter(Boolean).length===0) {
     const sib = people.find(x=>x.id===sibId);
-    if(sib) sib.pids.forEach(pid=>{ const par=people.find(x=>x.id===pid); if(par&&!par.cids.includes(eid2)) par.cids.push(eid2); });
+    if(sib) {
+      if(sib.pids.length > 0) {
+        sib.pids.forEach(pid=>{ const par=people.find(x=>x.id===pid); if(par&&!par.cids.includes(eid2)) par.cids.push(eid2); });
+      } else {
+        // oba bez rodičů — explicitní propojení přes sibids
+        const cur = people.find(x=>x.id===eid2);
+        if(cur){ if(!cur.sibids) cur.sibids=[]; if(!cur.sibids.includes(sibId)) cur.sibids.push(sibId); }
+        if(!sib.sibids) sib.sibids=[];
+        if(!sib.sibids.includes(eid2)) sib.sibids.push(eid2);
+      }
+    }
   }
   if(spId){ const s=people.find(p=>p.id===spId); if(s&&!s.sids.includes(eid2)) s.sids.push(eid2); }
   closeModal(); saveData(); renderTree();
@@ -1378,7 +1428,7 @@ function deleteSelected(){
   const p=people.find(x=>x.id===selId); if(!p) return;
   if(!confirm(`Opravdu smazat ${p.fn} ${p.ln}?`)) return;
   // remove references
-  people.forEach(q=>{ q.pids=q.pids.filter(x=>x!==selId); q.sids=q.sids.filter(x=>x!==selId); q.cids=q.cids.filter(x=>x!==selId); });
+  people.forEach(q=>{ q.pids=q.pids.filter(x=>x!==selId); q.sids=q.sids.filter(x=>x!==selId); q.cids=q.cids.filter(x=>x!==selId); if(q.sibids) q.sibids=q.sibids.filter(x=>x!==selId); });
   people=people.filter(x=>x.id!==selId);
   toast(`${p.fn} ${p.ln} smazán`);
   selId=null; closeInfo(); saveData(); renderTree();
