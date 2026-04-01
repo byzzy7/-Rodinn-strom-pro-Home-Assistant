@@ -982,6 +982,8 @@ function renderTree() {
       }
       const l1=S('line',{x1:String(x1),y1:String(my),x2:String(x2),y2:String(my),stroke:'#E8436B','stroke-width':'1.5','stroke-dasharray':'5 3','stroke-linecap':'round',opacity:'0.45'});
       cl.appendChild(l1);
+      const heart=ST('❤️',{x:String(mx),y:String(my+5),'text-anchor':'middle','font-size':'13',opacity:'0.75'});
+      cl.appendChild(heart);
     });
   });
 
@@ -1058,6 +1060,44 @@ function renderTree() {
 
     nl.appendChild(g);
   });
+
+  // --- Ghost cards (contextual add buttons for selected person) ---
+  if(selId) {
+    const sp = layout[selId];
+    const selP = bi[selId];
+    if(sp && selP) {
+      const gl = S('g');
+      root.appendChild(gl);
+
+      const ghost = (cx, cy, label, color, onClick, connType) => {
+        const gx = cx - NW/2, gy = cy - NH/2;
+        // Connector
+        if(connType === 'partner') {
+          const ln = S('line',{x1:String(sp.x+NW/2),y1:String(sp.y),x2:String(cx-NW/2),y2:String(cy),stroke:color,'stroke-width':'1.5','stroke-dasharray':'5 4',opacity:'0.5'});
+          gl.appendChild(ln);
+        } else if(connType === 'child') {
+          const fx=sp.x+NW/2, fy=sp.y+NH/2+4, ty=cy-NH/2-4, mid=(fy+ty)/2;
+          const path=S('path',{d:`M ${fx} ${fy} C ${fx} ${mid} ${cx} ${mid} ${cx} ${ty}`,fill:'none',stroke:color,'stroke-width':'1.5','stroke-dasharray':'5 4',opacity:'0.5'});
+          gl.appendChild(path);
+        }
+        // Card
+        const g=S('g',{transform:`translate(${gx},${gy})`,style:'cursor:pointer',opacity:'0.82'});
+        g.appendChild(S('rect',{width:String(NW),height:String(NH),rx:'14',fill:'var(--surface)',stroke:color,'stroke-width':'2','stroke-dasharray':'6 3'}));
+        g.appendChild(S('circle',{cx:'40',cy:String(NH/2),r:'24',fill:'var(--surface2)'}));
+        g.appendChild(S('circle',{cx:'40',cy:String(NH/2),r:'19',fill:color,opacity:'0.2'}));
+        g.appendChild(ST('＋',{x:'40',y:String(NH/2+7),'text-anchor':'middle',fill:color,'font-size':'17','font-weight':'700'}));
+        g.appendChild(ST(label,{x:'70',y:String(NH/2+5),fill:'var(--text2)','font-size':'12','font-family':'DM Sans,sans-serif'}));
+        g.addEventListener('click',e=>{e.stopPropagation();onClick();});
+        gl.appendChild(g);
+      };
+
+      if(!selP.sids.length)
+        ghost(sp.x+NW+HG, sp.y,        'Přidat partnera', '#E8436B', ()=>showAddRelative('partner',  selId), 'partner');
+      const cy = sp.y+NH+VG;
+      ghost(sp.x-NW/2-HG/2, cy, 'Přidat syna',     '#4A8FE0', ()=>showAddRelative('son',      selId), 'child');
+      ghost(sp.x+NW/2+HG/2, cy, 'Přidat dceru',    '#E8436B', ()=>showAddRelative('daughter',  selId), 'child');
+    }
+  }
 
   updateStats();
   applyTx();
@@ -1410,6 +1450,27 @@ function showAdd(){
   document.getElementById('add-modal').classList.add('visible');
   document.getElementById('f-fn').focus();
 }
+function showAddRelative(type, fromId) {
+  const fromP = people.find(p=>p.id===fromId); if(!fromP) return;
+  showAdd();
+  if(type==='partner') {
+    document.getElementById('f-spouse').value = fromId;
+    toggleWedding(fromId);
+  } else {
+    const g = type==='son' ? 'M' : 'F';
+    document.getElementById('f-gender').value = g; toggleMaiden(g);
+    if(fromP.gender==='F') document.getElementById('f-mother').value = fromId;
+    else                   document.getElementById('f-father').value = fromId;
+    const spId = fromP.sids[0];
+    if(spId) {
+      const sp = people.find(p=>p.id===spId);
+      if(sp) {
+        if(sp.gender==='F') document.getElementById('f-mother').value = sp.id;
+        else                document.getElementById('f-father').value = sp.id;
+      }
+    }
+  }
+}
 function editSelected(){
   const p=people.find(x=>x.id===selId); if(!p) return;
   photoData=p.photo||'';
@@ -1493,7 +1554,7 @@ function savePerson(){
   // check for circular parent-child reference (only when editing)
   if(eid) {
     for(const pid of [fId,mId].filter(Boolean)){
-      if(wouldCreateCycle(pid, eid)){ toast('Nelze přiřadit rodiče — vznikl by cyklus v rodokménu'); return; }
+      if(wouldCreateCycle(eid, pid)){ toast('Nelze přiřadit rodiče — vznikl by cyklus v rodokménu'); return; }
     }
   }
 
