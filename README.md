@@ -1,7 +1,7 @@
 # 🌳 Rodinný strom pro Home Assistant
 
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-panel-41BDF5?logo=home-assistant&logoColor=white)](https://www.home-assistant.io/)
-[![Verze](https://img.shields.io/badge/verze-3.3.0-brightgreen)](https://github.com/)
+[![Verze](https://img.shields.io/badge/verze-3.4.0-brightgreen)](https://github.com/)
 [![Licence](https://img.shields.io/badge/licence-MIT-blue)](LICENSE)
 [![Jazyk](https://img.shields.io/badge/jazyk-čeština-red)](README.md)
 [![HTML](https://img.shields.io/badge/technologie-HTML%20%2F%20JS%20%2F%20SVG-orange)](family-tree-v3.html)
@@ -214,6 +214,10 @@ Aplikace je záměrně navržena jako **jeden HTML soubor bez závislostí**:
 ---
 
 ## 📝 Changelog
+
+### v3.4.0
+- Oprava: partner bez rodičů se již nevyskytuje v jiné výškové řadě než druhý partner — hloubka se nově synchronizuje i po propagaci dětí dolů
+- Oprava layoutu: rodiče jsou nyní vždy horizontálně vycentrovaní nad svými dětmi (přidán bottom-up průchod po top-down rozložení)
 
 ### v3.3.0
 - Import JSON zálohy — obnova dat ze souboru bez HA

@@ -764,6 +764,27 @@ function computeLayout(ps) {
     });
   }
 
+  // Re-align spouses after child propagation — a partner without parents may have been
+  // left at a shallower depth if their spouse got pushed deeper by propagation above.
+  for(let pass=0; pass<10; pass++) {
+    let anyChange = false;
+    ps.forEach(p=>{
+      p.sids.forEach(sid=>{
+        if(depth[sid]===undefined || depth[p.id]===undefined) return;
+        if(depth[p.id] === depth[sid]) return;
+        const pHasParents = p.pids.some(pid=>ps.find(x=>x.id===pid));
+        const sHasParents = bi[sid]?.pids.some(pid=>ps.find(x=>x.id===pid));
+        let targetD;
+        if(pHasParents && !sHasParents)       targetD = depth[p.id];
+        else if(!pHasParents && sHasParents)  targetD = depth[sid];
+        else                                   targetD = Math.max(depth[p.id], depth[sid]);
+        if(depth[p.id] !== targetD){ depth[p.id]=targetD; anyChange=true; }
+        if(depth[sid] !== targetD){ depth[sid]=targetD; anyChange=true; }
+      });
+    });
+    if(!anyChange) break;
+  }
+
   // Then push parents above children (for root persons above other roots)
   changed=true;
   while(changed){
@@ -924,6 +945,61 @@ function computeLayout(ps) {
       });
     }
   });
+
+  // Bottom-up pass: center each generation over its actual child positions.
+  // The top-down pass places parents first, then children try to center under
+  // parents — but overlap resolution shifts children rightward, leaving parents
+  // offset. This pass corrects that by re-centering parents over where their
+  // children actually landed.
+  const maxD = sortedDepths.length ? Math.max(...sortedDepths) : 0;
+  for(let dUp = maxD - 1; dUp >= 0; dUp--) {
+    const ids2 = (bd[dUp] || []).filter(id => pos[id]);
+    if(!ids2.length) continue;
+
+    // Rebuild couple-units for this depth
+    const used2 = new Set();
+    const units2 = [];
+    ids2.forEach(id => {
+      if(used2.has(id)) return;
+      const spId = bi[id]?.sids.find(s => ids2.includes(s) && !used2.has(s));
+      if(spId) {
+        const male = (bi[id]?.gender==='M') ? id : (bi[spId]?.gender==='M' ? spId : id);
+        const female = male===id ? spId : id;
+        units2.push([male, female]);
+        used2.add(id); used2.add(spId);
+      } else {
+        if(!bi[id]?.sids.some(s => used2.has(s))) { units2.push([id]); used2.add(id); }
+      }
+    });
+    ids2.forEach(id => { if(!used2.has(id)) { units2.push([id]); used2.add(id); } });
+
+    // Sort units by current x
+    const unitCenterX = u => u.reduce((s,id) => s + (pos[id]?.x||0), 0) / u.length;
+    units2.sort((a,b) => unitCenterX(a) - unitCenterX(b));
+
+    // Move each unit to be centered over its children's actual positions
+    units2.forEach(unit => {
+      const childXs = [];
+      unit.forEach(id => (bi[id]?.cids||[]).forEach(cid => { if(pos[cid]) childXs.push(pos[cid].x); }));
+      if(!childXs.length) return;
+      const targetCenter = childXs.reduce((a,b) => a+b, 0) / childXs.length;
+      const shift = targetCenter - unitCenterX(unit);
+      unit.forEach(id => { if(pos[id]) pos[id].x += shift; });
+    });
+
+    // Re-sort and resolve overlaps left→right
+    units2.sort((a,b) => unitCenterX(a) - unitCenterX(b));
+    for(let i = 1; i < units2.length; i++) {
+      const prev = units2[i-1], curr = units2[i];
+      const prevRight = Math.max(...prev.map(id => pos[id]?.x||0)) + NW/2;
+      const currLeft  = Math.min(...curr.map(id => pos[id]?.x||0)) - NW/2;
+      if(currLeft < prevRight + HG) {
+        const push = (prevRight + HG) - currLeft;
+        curr.forEach(id => { if(pos[id]) pos[id].x += push; });
+      }
+    }
+  }
+
   return pos;
 }
 
